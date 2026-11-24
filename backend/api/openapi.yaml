@@ -1,0 +1,1379 @@
+openapi: 3.1.0
+info:
+  title: RoomFlow API
+  version: 1.0.0
+  description: |
+    RoomFlow 酒店房态与预订管理系统后端 API。顾客前端、酒店管理端和 AI Agent
+    使用同一套 REST 接口。
+
+    统一响应结构：
+    - 成功：`{"code":"OK","message":"success","data":...}`
+    - 失败：`{"code":"ROOM_NOT_AVAILABLE","message":"所选日期内房型库存不足","data":null}`
+
+    金额为十进制字符串（两位小数），日期为 `YYYY-MM-DD`，系统时间为 RFC 3339。
+    预订按房型创建，入住时分配具体房间。库存以日期重叠计算：已有预订满足
+    `existing.check_in < requested.check_out AND existing.check_out > requested.check_in`
+    时占用库存。
+servers:
+  - url: http://localhost:8080/api/v1
+    description: 本地开发
+tags:
+  - name: auth
+    description: 注册与登录
+  - name: users
+    description: 当前用户资料
+  - name: hotels
+    description: 酒店查询与管理
+  - name: room-types
+    description: 房型管理
+  - name: rooms
+    description: 实体客房与运营状态
+  - name: availability
+    description: 可订库存与报价
+  - name: bookings
+    description: 预订、取消、入住与退房
+  - name: statistics
+    description: 管理端统计
+
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: 注册顾客账号
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: 邮箱已注册
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 登录并获取 JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: 邮箱或密码错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /users/me:
+    get:
+      tags: [users]
+      summary: 获取当前用户资料
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [users]
+      summary: 修改姓名、电话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                phone: { type: string, maxLength: 32 }
+      responses:
+        '200':
+          description: 修改后的资料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /users/me/password:
+    patch:
+      tags: [users]
+      summary: 修改登录密码
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '200':
+          description: 修改成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /hotels:
+    get:
+      tags: [hotels]
+      summary: 酒店列表（只返回已上架酒店）
+      security: []
+      parameters:
+        - name: city
+          in: query
+          schema: { type: string }
+        - name: keyword
+          in: query
+          description: 酒店名称关键词
+          schema: { type: string }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 酒店分页列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HotelListEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      tags: [hotels]
+      summary: 创建酒店（创建者自动成为酒店管理者，初始状态 inactive）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HotelCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HotelEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /hotels/{hotelId}:
+    get:
+      tags: [hotels]
+      summary: 酒店详情（仅已上架酒店）
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200':
+          description: 酒店详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HotelEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [hotels]
+      summary: 修改酒店信息
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HotelUpdateRequest'
+      responses:
+        '200':
+          description: 修改后的酒店
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HotelEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /hotels/{hotelId}/status:
+    patch:
+      tags: [hotels]
+      summary: 上架或下架酒店
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, inactive]
+                  description: active 为上架，inactive 为下架
+      responses:
+        '200':
+          description: 修改后的酒店
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HotelEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /manager/hotels:
+    get:
+      tags: [hotels]
+      summary: 获取当前管理者负责的酒店
+      responses:
+        '200':
+          description: 负责的酒店（含未上架）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedHotelListEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /hotels/{hotelId}/room-types:
+    get:
+      tags: [room-types]
+      summary: 查询酒店公开房型
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200':
+          description: 启用中的房型
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomTypeListEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [room-types]
+      summary: 新增房型
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomTypeCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomTypeEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /room-types/{typeId}:
+    get:
+      tags: [room-types]
+      summary: 查询房型详情（仅启用中的房型）
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TypeId'
+      responses:
+        '200':
+          description: 房型详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomTypeEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [room-types]
+      summary: 修改房型、基础价格及配置
+      parameters:
+        - $ref: '#/components/parameters/TypeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomTypeUpdateRequest'
+      responses:
+        '200':
+          description: 修改后的房型
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomTypeEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /room-types/{typeId}/status:
+    patch:
+      tags: [room-types]
+      summary: 启用或停用房型
+      parameters:
+        - $ref: '#/components/parameters/TypeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, inactive]
+      responses:
+        '200':
+          description: 修改后的房型
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomTypeEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /hotels/{hotelId}/rooms:
+    get:
+      tags: [rooms]
+      summary: 查询酒店全部实体客房及状态
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200':
+          description: 客房列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomListEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [rooms]
+      summary: 添加实体客房
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 房号重复
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /rooms/{roomId}:
+    get:
+      tags: [rooms]
+      summary: 获取单间客房详情
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      responses:
+        '200':
+          description: 客房详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [rooms]
+      summary: 修改房号、所属房型及特征
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomUpdateRequest'
+      responses:
+        '200':
+          description: 修改后的客房
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 房号重复或房间正在入住
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      tags: [rooms]
+      summary: 删除未关联有效订单的客房
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 房间正在入住
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /rooms/{roomId}/status:
+    patch:
+      tags: [rooms]
+      summary: 设置维修、停用等运营状态
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomStatusRequest'
+      responses:
+        '200':
+          description: 修改后的客房
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 房间正在入住
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /hotels/{hotelId}/availability:
+    get:
+      tags: [availability]
+      summary: 查询指定日期范围内可预订房型及数量
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: check_in
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Date' }
+        - name: check_out
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Date' }
+        - name: guests
+          in: query
+          required: false
+          description: 入住人数；传入时只返回可容纳该人数的房型
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: 可订房型（available_count > 0）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /quotes:
+    post:
+      tags: [availability]
+      summary: 根据入住日期、人数、房型计算订单报价
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+      responses:
+        '200':
+          description: 报价
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /bookings:
+    post:
+      tags: [bookings]
+      summary: 创建预订（顾客）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingCreateRequest'
+      responses:
+        '201':
+          description: 预订创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingCreateEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 库存不足（ROOM_NOT_AVAILABLE）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    get:
+      tags: [bookings]
+      summary: 查询当前顾客的预订列表
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 预订分页列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingListEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /bookings/{bookingId}:
+    get:
+      tags: [bookings]
+      summary: 查询预订详情（订单所属顾客或酒店管理者）
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: 预订详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bookings/{bookingId}/cancel:
+    post:
+      tags: [bookings]
+      summary: 取消订单（仅 confirmed 状态）
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: 取消后的预订
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 当前订单状态不可取消（INVALID_BOOKING_STATUS）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /manager/bookings:
+    get:
+      tags: [bookings]
+      summary: 管理端查询酒店订单
+      parameters:
+        - name: hotel_id
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [confirmed, checked_in, checked_out, cancelled]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 预订分页列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingListEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /bookings/{bookingId}/check-in:
+    post:
+      tags: [bookings]
+      summary: 办理入住并分配房间
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                room_id:
+                  type: integer
+                  format: int64
+                  description: 指定房间；省略时自动分配一间可用客房
+      responses:
+        '200':
+          description: 入住后的预订
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 状态不允许入住或没有可用房间
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /bookings/{bookingId}/check-out:
+    post:
+      tags: [bookings]
+      summary: 办理退房
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: 退房后的预订
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 当前订单状态不可退房（INVALID_BOOKING_STATUS）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /manager/dashboard:
+    get:
+      tags: [statistics]
+      summary: 获取酒店管理首页概览
+      parameters:
+        - name: hotel_id
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 管理概览
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /manager/statistics/occupancy:
+    get:
+      tags: [statistics]
+      summary: 获取指定时间段入住率
+      parameters:
+        - name: hotel_id
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: start_date
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Date' }
+        - name: end_date
+          in: query
+          required: true
+          description: 结束日期（不含），必须晚于 start_date
+          schema: { $ref: '#/components/schemas/Date' }
+      responses:
+        '200':
+          description: 入住率统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OccupancyEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    HotelId:
+      name: hotelId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    TypeId:
+      name: typeId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    RoomId:
+      name: roomId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    BookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: 请求参数错误（INVALID_REQUEST）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: 未登录或认证失效（UNAUTHORIZED / INVALID_CREDENTIALS）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: 无权访问（FORBIDDEN）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: 资源不存在（NOT_FOUND）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Internal:
+      description: 服务器内部错误（INTERNAL_ERROR）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    Date:
+      type: string
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+      example: '2026-12-01'
+    Money:
+      type: string
+      pattern: '^\d+(\.\d{1,2})?$'
+      example: '328.00'
+
+    Envelope:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: string
+          description: 成功时为 OK，失败时为业务错误码
+        message:
+          type: string
+        data: {}
+
+    SuccessEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: 'null'
+
+    ErrorResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - UNAUTHORIZED
+            - INVALID_CREDENTIALS
+            - FORBIDDEN
+            - NOT_FOUND
+            - EMAIL_ALREADY_EXISTS
+            - ROOM_NOT_AVAILABLE
+            - INVALID_BOOKING_STATUS
+            - ROOM_NO_EXISTS
+            - ROOM_IN_USE
+            - INTERNAL_ERROR
+        message: { type: string, description: 中文错误说明 }
+        data:
+          type: 'null'
+
+    User:
+      type: object
+      required: [id, email, name, phone, role, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+        phone: { type: string }
+        role: { type: string, enum: [customer, manager] }
+        created_at: { type: string, format: date-time }
+
+    RegisterRequest:
+      type: object
+      required: [email, password, name]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 72 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        phone: { type: string, maxLength: 32 }
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in, user]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, example: 7200 }
+        user:
+          type: object
+          required: [id, name, role]
+          properties:
+            id: { type: integer, format: int64 }
+            name: { type: string }
+            role: { type: string, enum: [customer, manager] }
+
+    UserEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/User' }
+    LoginEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/LoginResponse' }
+
+    Hotel:
+      type: object
+      required: [id, name, city, address, description, facilities, status, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        city: { type: string }
+        address: { type: string }
+        description: { type: string }
+        facilities:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [active, inactive] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    HotelCreateRequest:
+      type: object
+      required: [name, city]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        city: { type: string, minLength: 1, maxLength: 100 }
+        address: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 5000 }
+        facilities:
+          type: array
+          items: { type: string }
+
+    HotelUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        city: { type: string, minLength: 1, maxLength: 100 }
+        address: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 5000 }
+        facilities:
+          type: array
+          items: { type: string }
+
+    HotelList:
+      type: object
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Hotel' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    ManagedHotelList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Hotel' }
+
+    HotelEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Hotel' }
+    HotelListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/HotelList' }
+    ManagedHotelListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ManagedHotelList' }
+
+    RoomType:
+      type: object
+      required: [id, hotel_id, name, description, base_price, max_guests, amenities, features, status, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        hotel_id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        base_price: { $ref: '#/components/schemas/Money' }
+        max_guests: { type: integer, minimum: 1 }
+        area:
+          type: [number, 'null']
+          description: 面积（平方米）
+        amenities:
+          type: array
+          items: { type: string }
+        features:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [active, inactive] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RoomTypeCreateRequest:
+      type: object
+      required: [name, base_price, max_guests]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 2000 }
+        base_price: { $ref: '#/components/schemas/Money' }
+        max_guests: { type: integer, minimum: 1, maximum: 20 }
+        area: { type: number, exclusiveMinimum: 0, maximum: 9999 }
+        amenities:
+          type: array
+          items: { type: string }
+        features:
+          type: array
+          items: { type: string }
+
+    RoomTypeUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 2000 }
+        base_price: { $ref: '#/components/schemas/Money' }
+        max_guests: { type: integer, minimum: 1, maximum: 20 }
+        area: { type: number, exclusiveMinimum: 0, maximum: 9999 }
+        amenities:
+          type: array
+          items: { type: string }
+        features:
+          type: array
+          items: { type: string }
+
+    RoomTypeList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RoomType' }
+
+    RoomTypeEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/RoomType' }
+    RoomTypeListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/RoomTypeList' }
+
+    Room:
+      type: object
+      required: [id, hotel_id, room_type_id, room_type_name, room_no, features, status, status_reason, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        hotel_id: { type: integer, format: int64 }
+        room_type_id: { type: integer, format: int64 }
+        room_type_name: { type: string }
+        room_no: { type: string }
+        features:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [active, maintenance, inactive] }
+        status_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RoomCreateRequest:
+      type: object
+      required: [room_no, room_type_id]
+      properties:
+        room_no: { type: string, minLength: 1, maxLength: 32 }
+        room_type_id: { type: integer, format: int64 }
+        features:
+          type: array
+          items: { type: string }
+
+    RoomUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        room_no: { type: string, minLength: 1, maxLength: 32 }
+        room_type_id: { type: integer, format: int64 }
+        features:
+          type: array
+          items: { type: string }
+
+    RoomStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [active, maintenance, inactive] }
+        reason: { type: string, maxLength: 255 }
+
+    RoomList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Room' }
+
+    RoomEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Room' }
+    RoomListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/RoomList' }
+
+    Availability:
+      type: object
+      required: [hotel_id, check_in, check_out, nights, room_types]
+      properties:
+        hotel_id: { type: integer, format: int64 }
+        check_in: { $ref: '#/components/schemas/Date' }
+        check_out: { $ref: '#/components/schemas/Date' }
+        nights: { type: integer, minimum: 1 }
+        room_types:
+          type: array
+          items:
+            type: object
+            required: [type_id, name, available_count, max_guests, base_price, features]
+            properties:
+              type_id: { type: integer, format: int64 }
+              name: { type: string }
+              available_count: { type: integer, minimum: 1 }
+              max_guests: { type: integer }
+              base_price: { $ref: '#/components/schemas/Money' }
+              features:
+                type: array
+                items: { type: string }
+
+    QuoteRequest:
+      type: object
+      required: [hotel_id, room_type_id, check_in, check_out, guests]
+      properties:
+        hotel_id: { type: integer, format: int64 }
+        room_type_id: { type: integer, format: int64 }
+        check_in: { $ref: '#/components/schemas/Date' }
+        check_out: { $ref: '#/components/schemas/Date' }
+        guests: { type: integer, minimum: 1 }
+
+    Quote:
+      type: object
+      required: [currency, nights, room_rate_total, fees, total]
+      properties:
+        currency: { type: string, const: CNY }
+        nights: { type: integer, minimum: 1 }
+        room_rate_total: { $ref: '#/components/schemas/Money' }
+        fees: { $ref: '#/components/schemas/Money' }
+        total: { $ref: '#/components/schemas/Money' }
+
+    AvailabilityEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Availability' }
+    QuoteEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Quote' }
+
+    BookingCreateRequest:
+      type: object
+      required: [hotel_id, room_type_id, check_in, check_out, guests, contact_name, contact_phone]
+      properties:
+        hotel_id: { type: integer, format: int64 }
+        room_type_id: { type: integer, format: int64 }
+        check_in: { $ref: '#/components/schemas/Date' }
+        check_out: { $ref: '#/components/schemas/Date' }
+        guests: { type: integer, minimum: 1 }
+        contact_name: { type: string, maxLength: 100 }
+        contact_phone: { type: string, maxLength: 32 }
+        special_requests: { type: string, maxLength: 1000 }
+
+    BookingCreateResponse:
+      type: object
+      required: [id, booking_no, status, total_amount, room_id]
+      properties:
+        id: { type: integer, format: int64 }
+        booking_no: { type: string, example: RF202612010001 }
+        status: { type: string, const: confirmed }
+        total_amount: { $ref: '#/components/schemas/Money' }
+        room_id:
+          type: [integer, 'null']
+          description: 创建时尚未分配房间，固定为 null
+
+    Booking:
+      type: object
+      required:
+        - id
+        - booking_no
+        - status
+        - hotel_id
+        - hotel_name
+        - room_type_id
+        - room_type_name
+        - check_in
+        - check_out
+        - nights
+        - guests
+        - currency
+        - total_amount
+        - contact_name
+        - contact_phone
+        - special_requests
+        - created_at
+      properties:
+        id: { type: integer, format: int64 }
+        booking_no: { type: string }
+        status: { type: string, enum: [confirmed, checked_in, checked_out, cancelled] }
+        hotel_id: { type: integer, format: int64 }
+        hotel_name: { type: string }
+        room_type_id: { type: integer, format: int64 }
+        room_type_name: { type: string }
+        room_id:
+          type: [integer, 'null']
+        room_no:
+          type: [string, 'null']
+        check_in: { $ref: '#/components/schemas/Date' }
+        check_out: { $ref: '#/components/schemas/Date' }
+        nights: { type: integer, minimum: 1 }
+        guests: { type: integer, minimum: 1 }
+        currency: { type: string }
+        total_amount: { $ref: '#/components/schemas/Money' }
+        contact_name: { type: string }
+        contact_phone: { type: string }
+        special_requests: { type: string }
+        created_at: { type: string, format: date-time }
+        cancelled_at:
+          type: [string, 'null']
+          format: date-time
+        checked_in_at:
+          type: [string, 'null']
+          format: date-time
+        checked_out_at:
+          type: [string, 'null']
+          format: date-time
+
+    BookingList:
+      type: object
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Booking' }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    BookingCreateEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/BookingCreateResponse' }
+    BookingEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Booking' }
+    BookingListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/BookingList' }
+
+    Dashboard:
+      type: object
+      required:
+        - hotel_id
+        - total_rooms
+        - occupied_rooms
+        - available_rooms
+        - unavailable_rooms
+        - today_check_ins
+        - today_check_outs
+      properties:
+        hotel_id: { type: integer, format: int64 }
+        total_rooms:
+          type: integer
+          description: 酒店全部实体客房数
+        occupied_rooms:
+          type: integer
+          description: 今天处于 confirmed 或 checked_in 且日期覆盖今天的预订数（不超过可运营房间数）
+        available_rooms:
+          type: integer
+          description: 可运营房间数 - occupied_rooms
+        unavailable_rooms:
+          type: integer
+          description: 状态为 maintenance 或 inactive 的客房数
+        today_check_ins:
+          type: integer
+          description: 入住日期为今天且未取消的订单数（含已办理入住）
+        today_check_outs:
+          type: integer
+          description: 退房日期为今天且已入住或已退房的订单数
+
+    Occupancy:
+      type: object
+      required:
+        - hotel_id
+        - start_date
+        - end_date
+        - total_rooms
+        - room_nights_available
+        - room_nights_occupied
+        - occupancy_rate
+      properties:
+        hotel_id: { type: integer, format: int64 }
+        start_date: { $ref: '#/components/schemas/Date' }
+        end_date: { $ref: '#/components/schemas/Date' }
+        total_rooms: { type: integer }
+        room_nights_available: { type: integer }
+        room_nights_occupied: { type: integer }
+        occupancy_rate:
+          type: number
+          minimum: 0
+          description: 入住率，保留四位小数
+
+    DashboardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Dashboard' }
+    OccupancyEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Occupancy' }
+
+security:
+  - bearerAuth: []

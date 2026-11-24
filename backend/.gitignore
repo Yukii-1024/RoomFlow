@@ -1,0 +1,5 @@
+.env
+/bin/
+/roomflow-server
+/roomflow-seed
+/seed
